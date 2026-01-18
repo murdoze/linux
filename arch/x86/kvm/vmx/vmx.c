@@ -2619,7 +2619,7 @@ static int setup_vmcs_config(struct vmcs_config *vmcs_conf,
 
 	memset(vmcs_conf, 0, sizeof(*vmcs_conf));
 
-	if (adjust_vmx_controls(KVM_REQUIRED_VMX_CPU_BASED_VM_EXEC_CONTROL,
+	if (adjust_vmx_controls(KVM_REQUIRED_VMX_CPU_BASED_VM_EXEC_CONTROL | CPU_BASED_CR3_LOAD_EXITING | CPU_BASED_CR3_STORE_EXITING,
 				KVM_OPTIONAL_VMX_CPU_BASED_VM_EXEC_CONTROL,
 				MSR_IA32_VMX_PROCBASED_CTLS,
 				&_cpu_based_exec_control))
@@ -4465,9 +4465,10 @@ static u32 vmx_exec_control(struct vcpu_vmx *vmx)
 #endif
 	/* No need to intercept CR3 access or INVPLG when using EPT. */
 	if (enable_ept)
-		exec_control &= ~(CPU_BASED_CR3_LOAD_EXITING |
+		exec_control &= ~(CPU_BASED_INVLPG_EXITING);
+		/*exec_control &= ~(CPU_BASED_CR3_LOAD_EXITING |
 				  CPU_BASED_CR3_STORE_EXITING |
-				  CPU_BASED_INVLPG_EXITING);
+				  CPU_BASED_INVLPG_EXITING);*/
 	if (kvm_mwait_in_guest(vmx->vcpu.kvm))
 		exec_control &= ~(CPU_BASED_MWAIT_EXITING |
 				CPU_BASED_MONITOR_EXITING);
