@@ -29,6 +29,8 @@
 #include <linux/tboot.h>
 #include <linux/trace_events.h>
 
+#include <kvm/vamp.h>
+
 #include <asm/apic.h>
 #include <asm/asm.h>
 #include <asm/cpu.h>
@@ -2621,7 +2623,7 @@ static int setup_vmcs_config(struct vmcs_config *vmcs_conf,
 
 	if (adjust_vmx_controls(KVM_REQUIRED_VMX_CPU_BASED_VM_EXEC_CONTROL 
 #ifdef CONFIG_KVM_PROTECT_PGTABLE				
-				| CPU_BASED_CR3_LOAD_EXITING | CPU_BASED_CR3_STORE_EXITING
+				| CPU_BASED_CR3_LOAD_EXITING
 #endif				
 				,
 				KVM_OPTIONAL_VMX_CPU_BASED_VM_EXEC_CONTROL,
@@ -4470,9 +4472,8 @@ static u32 vmx_exec_control(struct vcpu_vmx *vmx)
 	/* No need to intercept CR3 access or INVPLG when using EPT. */
 	if (enable_ept)
 		exec_control &= ~(
-#ifdef CONFIG_KVM_PROTECT_PGTABLE				
+#ifndef CONFIG_KVM_PROTECT_PGTABLE
 				  CPU_BASED_CR3_LOAD_EXITING |
-				  CPU_BASED_CR3_STORE_EXITING |
 #endif				  
 				  CPU_BASED_INVLPG_EXITING);
 	if (kvm_mwait_in_guest(vmx->vcpu.kvm))
@@ -5427,6 +5428,24 @@ static int handle_set_cr0(struct kvm_vcpu *vcpu, unsigned long val)
 	}
 }
 
+static int handle_set_cr3(struct kvm_vcpu *vcpu, unsigned long val)
+{
+#ifdef CONFIG_KVM_PROTECT_PGTABLE
+	if (!enable_ept)
+		return kvm_set_cr3(vcpu, val);
+
+	unsigned long cr3 = val;
+
+	vamp_pr_cr3(cr3);
+	vamp_kvm_dump_guest_cr3(vcpu->kvm, cr3);
+
+#else
+	WARN_ON_ONCE(enable_unrestricted_guest);
+#endif
+
+	return kvm_set_cr3(vcpu, val);
+}
+
 static int handle_set_cr4(struct kvm_vcpu *vcpu, unsigned long val)
 {
 	if (is_guest_mode(vcpu)) {
@@ -5476,9 +5495,7 @@ static int handle_cr(struct kvm_vcpu *vcpu)
 			err = handle_set_cr0(vcpu, val);
 			return kvm_complete_insn_gp(vcpu, err);
 		case 3:
-			WARN_ON_ONCE(enable_unrestricted_guest);
-
-			err = kvm_set_cr3(vcpu, val);
+			err = handle_set_cr3(vcpu, val);
 			return kvm_complete_insn_gp(vcpu, err);
 		case 4:
 			err = handle_set_cr4(vcpu, val);
