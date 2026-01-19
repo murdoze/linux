@@ -13,12 +13,23 @@ void kvm_init_guest_pgtable_protection(struct kvm *kvm)
 	pr_info("Initialise guest page table protection");
 }
 
-
-static void update_pgtable_entry(struct xarray *pgte, u64 val)
+static int update_pgtable_entry(struct xarray *xa_pgte, u64 val)
 {
-	// void *xa_store(struct xarray *, unsigned long index, void *entry, gfp_t);
+	int res;
 
-	pr_info("\e[42m PGTE GPA=%016llx \e[0m", val);
+	xa_lock(xa_pgte);
+	res = xa_insert(xa_pgte, val, (void *)val, GFP_KERNEL);
+	xa_unlock(xa_pgte);
+
+	
+	if (res == -ENOMEM)
+		return res;
+
+	if (res == 0) {
+		pr_info("\e[42m New PGTE GPA=%016llx \e[0m", val);
+	}
+
+	return 0;
 }
 
 static u64 cr3_to_pfn(u64 cr3)
@@ -26,22 +37,24 @@ static u64 cr3_to_pfn(u64 cr3)
 	return (cr3 & CR3_ADDR_MASK) >> PAGE_SHIFT;
 }
 
-static bool kvm_update_guest_cr3(struct kvm *kvm, unsigned long cr3)
+static int kvm_update_guest_cr3(struct xarray *xa_cr3_pfn, unsigned long cr3)
 {
-	bool res = false;
+	int res;
 
 	u64 cr3_pfn = cr3_to_pfn(cr3);
-	struct xarray *xa = &kvm->arch.guest_pgtable_protection.cr3_pfn;
 
-	xa_lock(xa);
-	if (xa_load(xa, cr3_pfn) == NULL) {
-		xa_store(xa, cr3_pfn, (void *)cr3, GFP_KERNEL);
+	xa_lock(xa_cr3_pfn);
+	res = xa_insert(xa_cr3_pfn, cr3_pfn, (void *)cr3_pfn, GFP_KERNEL);
+	xa_unlock(xa_cr3_pfn);
+
+	if (res == -ENOMEM)
+		return res;
+
+	if (res == 0) {
 		pr_info("\e[45m New CR3, PFN=%016llx \e[0m", cr3_pfn);
-		res = true;
 	}
-	xa_unlock(xa);
 
-	return res;
+	return 0;
 }
 
 static int guest_dumped1 = 3000;
@@ -77,7 +90,9 @@ static int kvm_update_guest_pgtes(struct kvm *kvm, unsigned long cr3)
 
 		unsigned long gpa_pml4e = g_pml4e & PGT_ADDR_MASK;
 
-		update_pgtable_entry(&kvm->arch.guest_pgtable_protection.pages, gpa_pml4e);
+		res = update_pgtable_entry(&kvm->arch.guest_pgtable_protection.pages, gpa_pml4e);
+		if (res)
+			goto out;
 
 		u64 gpa_pdpt = gpa_pml4e;
 		res = kvm_read_guest(kvm, gpa_pdpt, l3_pgte_page, PAGE_SIZE);
@@ -96,7 +111,9 @@ static int kvm_update_guest_pgtes(struct kvm *kvm, unsigned long cr3)
 
 			u64 gpa_pdpte = g_pdpte & PGT_ADDR_MASK;
 
-			update_pgtable_entry(&kvm->arch.guest_pgtable_protection.pages, gpa_pdpte);
+			res = update_pgtable_entry(&kvm->arch.guest_pgtable_protection.pages, gpa_pdpte);
+			if (res)
+				goto out;
 
 			u64 gpa_pd = gpa_pdpte;
 			res = kvm_read_guest(kvm, gpa_pd, l2_pgte_page, PAGE_SIZE);
@@ -115,7 +132,9 @@ static int kvm_update_guest_pgtes(struct kvm *kvm, unsigned long cr3)
 
 				u64 gpa_pde = g_pde & PGT_ADDR_MASK;
 
-				update_pgtable_entry(&kvm->arch.guest_pgtable_protection.pages, gpa_pde);
+				res = update_pgtable_entry(&kvm->arch.guest_pgtable_protection.pages, gpa_pde);
+				if (res)
+					goto out;
 			}
 		}
 	}
@@ -128,13 +147,17 @@ out:
 
 int kvm_update_guest_pgtable_protection(struct kvm *kvm, unsigned long cr3)
 {
-	int ret = 0;
+	int res;
 
-	if (kvm_update_guest_cr3(kvm, cr3)) {
-		ret = kvm_update_guest_pgtes(kvm, cr3);
+	res = kvm_update_guest_cr3(&kvm->arch.guest_pgtable_protection.cr3_pfn, cr3);
+	if (res == -ENOMEM)
+		return res;
+
+	if (res == 0) {
+		res = kvm_update_guest_pgtes(kvm, cr3);
 	}
 
-	return ret;
+	return res;
 }
 
 /* ********************************************************************************************* */
