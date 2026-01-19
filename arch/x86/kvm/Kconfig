@@ -226,6 +226,17 @@ config KVM_PROVE_MMU
 
 	  If in doubt, say "N".
 
+config KVM_PROTECT_PGTABLE
+	bool "Protect writes to kernel page tables from userspace"
+	depends on KVM_X86
+	depends on KVM_INTEL
+	depends on EXPERT
+	help
+	  Protects kernel page table structures from malicious writes
+	  from userspace via page remapping attacks
+
+	  If in doubt, say "N".
+
 config KVM_EXTERNAL_WRITE_TRACKING
 	bool
 
