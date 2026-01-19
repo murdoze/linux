@@ -1,9 +1,145 @@
-#include "linux/kvm_types.h"
 #include <kvm/vamp.h>
 
 #include <linux/kvm_host.h>
 
+#include <linux/xarray.h>
 #include <linux/printk.h>
+
+#define PGT_ADDR_MASK 0x000ffffffffff000
+#define PGTE_PER_PAGE (PAGE_SIZE / sizeof(u64))
+
+void kvm_init_guest_pgtable_protection(struct kvm *kvm)
+{
+	pr_info("Initialise guest page table protection");
+}
+
+
+static void update_pgtable_entry(struct xarray *pgte, u64 val)
+{
+	// void *xa_store(struct xarray *, unsigned long index, void *entry, gfp_t);
+
+	pr_info("\e[42m PGTE GPA=%016llx \e[0m", val);
+}
+
+static u64 cr3_to_pfn(u64 cr3)
+{
+	return (cr3 & CR3_ADDR_MASK) >> PAGE_SHIFT;
+}
+
+static bool kvm_update_guest_cr3(struct kvm *kvm, unsigned long cr3)
+{
+	bool res = false;
+
+	u64 cr3_pfn = cr3_to_pfn(cr3);
+	struct xarray *xa = &kvm->arch.guest_pgtable_protection.cr3_pfn;
+
+	xa_lock(xa);
+	if (xa_load(xa, cr3_pfn) == NULL) {
+		xa_store(xa, cr3_pfn, (void *)cr3, GFP_KERNEL);
+		pr_info("\e[45m New CR3, PFN=%016llx \e[0m", cr3_pfn);
+		res = true;
+	}
+	xa_unlock(xa);
+
+	return res;
+}
+
+static int guest_dumped1 = 3000;
+
+static int kvm_update_guest_pgtes(struct kvm *kvm, unsigned long cr3)
+{
+
+	if (guest_dumped1 == 0)
+		return 0;
+	guest_dumped1--;
+
+	int res = 0;
+
+	unsigned long pages = __get_free_pages(GFP_KERNEL, 2);
+	if (!pages)
+		return -ENOMEM;
+	u64 *pt_pages = (u64 *)pages;
+	u64 *l4_pgte_page = pt_pages;
+	u64 *l3_pgte_page = pt_pages + PAGE_SIZE;
+	u64 *l2_pgte_page = pt_pages + PAGE_SIZE + PAGE_SIZE;
+
+	u64 gpa_pml4 = cr3 & CR3_ADDR_MASK;
+
+	res = kvm_read_guest(kvm, gpa_pml4, l4_pgte_page, PAGE_SIZE);
+	if (res)
+		goto out;
+
+	for (int i4 = 0; i4 < PGTE_PER_PAGE; i4++)
+	{
+		u64 g_pml4e = l4_pgte_page[i4];
+		if ((g_pml4e & 1) == 0)
+			continue;
+
+		unsigned long gpa_pml4e = g_pml4e & PGT_ADDR_MASK;
+
+		update_pgtable_entry(&kvm->arch.guest_pgtable_protection.pages, gpa_pml4e);
+
+		u64 gpa_pdpt = gpa_pml4e;
+		res = kvm_read_guest(kvm, gpa_pdpt, l3_pgte_page, PAGE_SIZE);
+		if (res)
+			goto out;
+
+		for (int i3 = 0; i3 < PGTE_PER_PAGE; i3++)
+		{
+			u64 g_pdpte = l3_pgte_page[i3];
+			if ((g_pdpte & 1) == 0)
+				continue;
+
+			bool is_page = g_pdpte & (1 << 7);
+			if (is_page)
+				continue;
+
+			u64 gpa_pdpte = g_pdpte & PGT_ADDR_MASK;
+
+			update_pgtable_entry(&kvm->arch.guest_pgtable_protection.pages, gpa_pdpte);
+
+			u64 gpa_pd = gpa_pdpte;
+			res = kvm_read_guest(kvm, gpa_pd, l2_pgte_page, PAGE_SIZE);
+			if (res)
+				goto out;
+
+			for (int i2 = 0; i2 < PGTE_PER_PAGE; i2++)
+			{
+				u64 g_pde = l2_pgte_page[i2];
+				if ((g_pde & 1) == 0)
+					continue;
+
+				bool is_page = g_pde & (1 << 7);
+				if (is_page)
+					continue;
+
+				u64 gpa_pde = g_pde & PGT_ADDR_MASK;
+
+				update_pgtable_entry(&kvm->arch.guest_pgtable_protection.pages, gpa_pde);
+			}
+		}
+	}
+
+out:
+	free_pages(pages, 2);
+
+	return res;
+}
+
+int kvm_update_guest_pgtable_protection(struct kvm *kvm, unsigned long cr3)
+{
+	int ret = 0;
+
+	if (kvm_update_guest_cr3(kvm, cr3)) {
+		ret = kvm_update_guest_pgtes(kvm, cr3);
+	}
+
+	return ret;
+}
+
+/* ********************************************************************************************* */
+/*                                     PRINT CR3                                                 */
+/* ********************************************************************************************* */
 
 static int pr_cr3_count = 3;
 
@@ -14,11 +150,9 @@ void vamp_pr_cr3(unsigned long cr3)
 	pr_cr3_count--;
 
 	long int pml = cr3 & 0x7ffffffffffff000;
-	pr_info("\e[41;m Write CR3 = %016lx (%016lx) \e[0m", cr3, pml);
+	pr_info("\e[41m Write CR3 = %016lx (%016lx) \e[0m", cr3, pml);
 	//dump_stack();
 }
-
-/* Page table dump */
 
 /* ********************************************************************************************* */
 /*                                DUMP 4-LEVEL PAGETABLE STARING WITH CR3                        */
@@ -116,6 +250,10 @@ void vamp_dump_cr3(unsigned long cr3)
 	// BUG();
 }
 
+/* ********************************************************************************************* */
+/*                             DUMP GUEST 4-LEVEL PAGETABLE STARING WITH CR3                     */
+/* ********************************************************************************************* */
+
 static int guest_dumped = 3000;
 
 void vamp_kvm_dump_guest_cr3(struct kvm *kvm, unsigned long cr3)
@@ -124,7 +262,7 @@ void vamp_kvm_dump_guest_cr3(struct kvm *kvm, unsigned long cr3)
 		return;
 	guest_dumped--;
 
-	pr_info("\e[44m = GUEST PAGE DUMP BEGIN = \e[0m");
+	pr_info("\e[44m = GUEST PAGE DUMP BEGIN = (%d) \e[0m", guest_dumped);
 
 
 	u64 gpa_pml4 = cr3 & 0x0ffffffffffff000;
@@ -212,7 +350,6 @@ void vamp_kvm_dump_guest_cr3(struct kvm *kvm, unsigned long cr3)
 			}
 		}
 	}
-
 
 	pr_info("\e[44m = GUEST PAGE DUMP END = \e[0m");
 }

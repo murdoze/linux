@@ -85,6 +85,8 @@
 #include <asm/sgx.h>
 #include <clocksource/hyperv_timer.h>
 
+#include <kvm/vamp.h>
+
 #define CREATE_TRACE_POINTS
 #include "trace.h"
 
@@ -13166,6 +13168,8 @@ int kvm_arch_init_vm(struct kvm *kvm, unsigned long type)
 	kvm_apicv_init(kvm);
 	kvm_hv_init_vm(kvm);
 	kvm_xen_init_vm(kvm);
+
+	kvm_init_guest_pgtable_protection(kvm);
 
 	if (ignore_msrs && !report_ignored_msrs) {
 		pr_warn_once("Running KVM with ignore_msrs=1 and report_ignored_msrs=0 is not a\n"

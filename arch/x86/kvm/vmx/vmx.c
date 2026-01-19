@@ -5431,14 +5431,16 @@ static int handle_set_cr0(struct kvm_vcpu *vcpu, unsigned long val)
 static int handle_set_cr3(struct kvm_vcpu *vcpu, unsigned long val)
 {
 #ifdef CONFIG_KVM_PROTECT_PGTABLE
+	int ret;
+
 	if (!enable_ept)
 		return kvm_set_cr3(vcpu, val);
 
 	unsigned long cr3 = val;
 
-	vamp_pr_cr3(cr3);
-	vamp_kvm_dump_guest_cr3(vcpu->kvm, cr3);
-
+	ret = kvm_update_guest_pgtable_protection(vcpu->kvm, cr3);
+	if (ret)
+		return ret;
 #else
 	WARN_ON_ONCE(enable_unrestricted_guest);
 #endif

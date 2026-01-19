@@ -1371,6 +1371,12 @@ struct kvm_possible_nx_huge_pages {
 	u64 nr_pages;
 };
 
+struct kvm_guest_pgtable_protection
+{
+	struct xarray cr3_pfn;
+	struct xarray pages;
+};
+
 enum kvm_mmu_type {
 	KVM_SHADOW_MMU,
 #ifdef CONFIG_X86_64
@@ -1520,6 +1526,10 @@ struct kvm_arch {
 	 * check that KVM isn't leaking TDP MMU pages.
 	 */
 	atomic64_t tdp_mmu_pages;
+#endif
+
+#ifdef CONFIG_KVM_PROTECT_PGTABLE
+	struct kvm_guest_pgtable_protection guest_pgtable_protection;
 #endif
 
 	/*
