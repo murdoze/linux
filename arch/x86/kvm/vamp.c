@@ -1,3 +1,5 @@
+#include "linux/stddef.h"
+#include "vdso/page.h"
 #include <kvm/vamp.h>
 
 #include <linux/kvm_host.h>
@@ -5,14 +7,85 @@
 #include <linux/xarray.h>
 #include <linux/printk.h>
 
+#include <mmu/mmu_internal.h>
+#include <mmu/tdp_mmu.h>
+#include <mmu/tdp_iter.h>
+
 #define PGT_ADDR_MASK 0x000ffffffffff000
 #define PGTE_PER_PAGE (PAGE_SIZE / sizeof(u64))
 
 static int protect_guest_pagetable_entry(struct kvm_vcpu *vcpu, gpa_t gpte)
 {
-	/* int kvm_tdp_mmu_map(struct kvm_vcpu *vcpu, struct kvm_page_fault *fault) */
+	struct kvm_page_fault _fault = {
+		.addr = gpte,
+		.error_code = PFERR_WRITE_MASK | PFERR_USER_MASK,
+		.exec = false,
+		.write = false,
+		.present = false,
+		.rsvd = false,
+		.user = false,
+		.prefetch = false,
+		.is_tdp = true,
+		.nx_huge_page_workaround_enabled = is_nx_huge_page_enabled(vcpu->kvm),
 
-	return 0;
+		.max_level = KVM_MAX_HUGEPAGE_LEVEL,
+		.req_level = PG_LEVEL_4K,
+		.goal_level = PG_LEVEL_4K,
+		.is_private = false,
+
+		.pfn = gpte >> PAGE_SHIFT,
+	};
+	if (vcpu->arch.mmu->root_role.direct) {
+		/*
+		 * Things like memslots don't understand the concept of a shared
+		 * bit. Strip it so that the GFN can be used like normal, and the
+		 * fault.addr can be used when the shared bit is needed.
+		 */
+		_fault.gfn = gpa_to_gfn(_fault.addr) & ~kvm_gfn_direct_bits(vcpu->kvm);
+		_fault.slot = kvm_vcpu_gfn_to_memslot(vcpu, _fault.gfn);
+	}
+	struct kvm_page_fault *fault = &_fault;
+
+	/* res = kvm_tdp_mmu_map(vcpu, &fault); */
+
+	int ret; 
+
+	ret = RET_PF_RETRY;
+
+	struct kvm_mmu_page *root = tdp_mmu_get_root_for_fault(vcpu, fault);
+	struct kvm *kvm = vcpu->kvm;
+	struct tdp_iter iter;
+	struct kvm_mmu_page *sp;
+	u64 new_spte;
+
+	rcu_read_lock();
+
+	for_each_tdp_pte(iter, kvm, root, fault->gfn, fault->gfn + 1) {
+		if (iter.level == fault->goal_level)
+			goto map_target_level;
+
+		if (is_shadow_present_pte(iter.old_spte) &&
+		    !is_large_pte(iter.old_spte))
+			continue;
+	}
+	pr_err("\e[43m TDP PTE not found \e[0m");
+	goto out;	
+
+map_target_level:
+
+	new_spte = iter.old_spte;
+
+	new_spte = new_spte & (~PT_WRITABLE_MASK);
+
+	ret = kvm_tdp_mmu_set_spte_atomic(vcpu->kvm, &iter, new_spte);
+	kvm_flush_remote_tlbs_gfn(vcpu->kvm, iter.gfn, iter.level);
+
+	pr_info("\e[42m TDP PTE found, level=%d gfn=%016llx old_spte=%016llx new_spte=%016llx ret=%d\e[0m",
+			iter.level, iter.gfn, iter.old_spte, new_spte, ret);
+out:	
+	rcu_read_unlock();
+
+	return ret;
 }
 
 static int update_pgtable_entry(struct kvm_vcpu *vcpu, gpa_t gpte)
@@ -32,10 +105,13 @@ static int update_pgtable_entry(struct kvm_vcpu *vcpu, gpa_t gpte)
 	if (res == 0) {
 		pr_info("\e[42m New PGTE GPA=%016llx, protecting... \e[0m", gpte);
 
-		protect_guest_pagetable_entry(vcpu, gpte);
+		res = protect_guest_pagetable_entry(vcpu, gpte);
+		if (res != 0) {
+			pr_err("\e[41m Protecting failed, error = %d \e[0m", res);
+		}
 	}
 
-	return 0;
+	return res;
 }
 
 static u64 cr3_to_pfn(u64 cr3)

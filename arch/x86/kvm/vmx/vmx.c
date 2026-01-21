@@ -5440,7 +5440,7 @@ static int handle_set_cr3(struct kvm_vcpu *vcpu, unsigned long val)
 
 	ret = kvm_update_guest_pgtable_protection(vcpu, cr3);
 	if (ret)
-		return ret;
+		WARN_ON_ONCE(false);
 #else
 	WARN_ON_ONCE(enable_unrestricted_guest);
 #endif

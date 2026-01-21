@@ -731,6 +731,11 @@ static inline int __must_check tdp_mmu_set_spte_atomic(struct kvm *kvm,
 	return 0;
 }
 
+int kvm_tdp_mmu_set_spte_atomic(struct kvm *kvm, struct tdp_iter *iter, u64 new_spte)
+{
+	return tdp_mmu_set_spte_atomic(kvm, iter, new_spte);
+}
+
 /*
  * tdp_mmu_set_spte - Set a TDP MMU SPTE and handle the associated bookkeeping
  * @kvm:	      KVM instance
