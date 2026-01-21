@@ -5438,7 +5438,7 @@ static int handle_set_cr3(struct kvm_vcpu *vcpu, unsigned long val)
 
 	unsigned long cr3 = val;
 
-	ret = kvm_update_guest_pgtable_protection(vcpu->kvm, cr3);
+	ret = kvm_update_guest_pgtable_protection(vcpu, cr3);
 	if (ret)
 		return ret;
 #else
