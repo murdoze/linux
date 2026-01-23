@@ -3436,6 +3436,8 @@ void vmx_load_mmu_pgd(struct kvm_vcpu *vcpu, hpa_t root_hpa, int root_level)
 		else /* vmcs.GUEST_CR3 is already up-to-date. */
 			update_guest_cr3 = false;
 		vmx_ept_load_pdptrs(vcpu);
+		
+		kvm_protect_guest_pagetable(vcpu, root_hpa);
 	} else {
 		guest_cr3 = root_hpa | kvm_get_active_pcid(vcpu) |
 			    kvm_get_active_cr3_lam_bits(vcpu);
@@ -5787,6 +5789,19 @@ static int handle_ept_violation(struct kvm_vcpu *vcpu)
 
 	gpa = vmcs_read64(GUEST_PHYSICAL_ADDRESS);
 	trace_kvm_page_fault(vcpu, gpa, exit_qualification);
+
+
+	int cpl = vmx_get_cpl(vcpu);
+	if (kvm_is_protected_pgtable_entry(vcpu, gpa)) {
+		if (cpl == 3) {
+			unsigned long ept_write_mask = (1 << 1) | (1 << 8);
+			if ((exit_qualification & ept_write_mask) == ept_write_mask) {
+				pr_info("\e[41m EPT VIOLATION FOR A PROTECTED GPA=%016llx CPL=%d exit_qualification=%016lx  \e[0m", gpa, cpl, exit_qualification);
+			}
+		}
+	} else {
+		// pr_info("\e[45m EPT VIOLATION FOR UNPROTECTED GPA=%016llx \e[0m", gpa);
+	}
 
 	/*
 	 * Check that the GPA doesn't exceed physical memory limits, as that is

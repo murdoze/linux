@@ -1,4 +1,7 @@
+#include "linux/gfp_types.h"
+#include "linux/rcupdate.h"
 #include "linux/stddef.h"
+#include "mmu/spte.h"
 #include "vdso/page.h"
 #include <kvm/vamp.h>
 
@@ -11,104 +14,117 @@
 #include <mmu/tdp_mmu.h>
 #include <mmu/tdp_iter.h>
 
+#include "mmu.h"
+
 #define PGT_ADDR_MASK 0x000ffffffffff000
 #define PGTE_PER_PAGE (PAGE_SIZE / sizeof(u64))
 
-static int protect_guest_pagetable_entry(struct kvm_vcpu *vcpu, gpa_t gpte)
+static inline gfn_t tdp_mmu_max_gfn_exclusive(void)
 {
-	struct kvm_page_fault _fault = {
-		.addr = gpte,
-		.error_code = PFERR_WRITE_MASK | PFERR_USER_MASK,
-		.exec = false,
-		.write = false,
-		.present = false,
-		.rsvd = false,
-		.user = false,
-		.prefetch = false,
-		.is_tdp = true,
-		.nx_huge_page_workaround_enabled = is_nx_huge_page_enabled(vcpu->kvm),
+	/*
+	 * Bound TDP MMU walks at host.MAXPHYADDR.  KVM disallows memslots with
+	 * a gpa range that would exceed the max gfn, and KVM does not create
+	 * MMIO SPTEs for "impossible" gfns, instead sending such accesses down
+	 * the slow emulation path every time.
+	 */
+	return kvm_mmu_max_gfn() + 1;
+}
 
-		.max_level = KVM_MAX_HUGEPAGE_LEVEL,
-		.req_level = PG_LEVEL_4K,
-		.goal_level = PG_LEVEL_4K,
-		.is_private = false,
+int kvm_protect_guest_pagetable(struct kvm_vcpu *vcpu, hpa_t root_hpa)
+{
+	//if (!vcpu->kvm->arch.guest_pgtable_protection.dirty)
+	//	return 0;
 
-		.pfn = gpte >> PAGE_SHIFT,
-	};
-	if (vcpu->arch.mmu->root_role.direct) {
-		/*
-		 * Things like memslots don't understand the concept of a shared
-		 * bit. Strip it so that the GFN can be used like normal, and the
-		 * fault.addr can be used when the shared bit is needed.
-		 */
-		_fault.gfn = gpa_to_gfn(_fault.addr) & ~kvm_gfn_direct_bits(vcpu->kvm);
-		_fault.slot = kvm_vcpu_gfn_to_memslot(vcpu, _fault.gfn);
-	}
-	struct kvm_page_fault *fault = &_fault;
+	int ret = 0; 
 
-	/* res = kvm_tdp_mmu_map(vcpu, &fault); */
+	struct kvm_mmu_page *root = root_to_sp(root_hpa);
 
-	int ret; 
-
-	ret = RET_PF_RETRY;
-
-	struct kvm_mmu_page *root = tdp_mmu_get_root_for_fault(vcpu, fault);
-	struct kvm *kvm = vcpu->kvm;
 	struct tdp_iter iter;
-	struct kvm_mmu_page *sp;
 	u64 new_spte;
+
+	struct xarray *xa_pgte = &vcpu->kvm->arch.guest_pgtable_protection.pages;
+	unsigned long pte_gfn;
+	void *spte;
+
+	//pr_info("\e[54m *********************************************************************************************** \e[0m");
+
+	xa_lock(xa_pgte);
 
 	rcu_read_lock();
 
-	for_each_tdp_pte(iter, kvm, root, fault->gfn, fault->gfn + 1) {
-		if (iter.level == fault->goal_level)
-			goto map_target_level;
+	xa_for_each(xa_pgte, pte_gfn, spte) {
+		// if ((uintptr_t)spte == FROZEN_SPTE) {
+			for_each_tdp_pte(iter, vcpu->kvm, root, pte_gfn, pte_gfn + 1) {
+				if (iter.level == PG_LEVEL_4K) {
+					if (iter.gfn != pte_gfn) {
+						pr_err("\e[41m Found wrong GFN, level=%d searched=%016lx found=%016llx \e[0m", iter.level, pte_gfn, iter.gfn);
+						goto out;
+					}
+					if ((iter.old_spte & PT_WRITABLE_MASK) == 0)
+						continue;
 
-		if (is_shadow_present_pte(iter.old_spte) &&
-		    !is_large_pte(iter.old_spte))
-			continue;
+					new_spte = iter.old_spte & ~(PT_WRITABLE_MASK);
+
+					ret = kvm_tdp_mmu_set_spte_atomic(vcpu->kvm, &iter, new_spte);
+
+					kvm_flush_remote_tlbs_gfn(vcpu->kvm, iter.gfn, iter.level);
+
+					//pr_info("\e[42m TDP PTE found, root=%016llx level=%d gfn=%016llx old_spte=%016llx new_spte=%016llx ret=%d\e[0m",
+					//	root_hpa, iter.level, iter.gfn, iter.old_spte, new_spte, ret);
+
+					if (ret)
+						goto out;
+
+					//void *xa_ret = xa_store(xa_pgte, pte_gfn, (void *)new_spte, GFP_KERNEL);
+					//if (xa_ret != (void *)FROZEN_SPTE)
+					//	goto out;
+				}
+			}
+
+			//pr_info("\e[45m PTE gfn=%016lx \e[0m", pte_gfn);
+		//}
 	}
-	pr_err("\e[43m TDP PTE not found \e[0m");
-	goto out;	
 
-map_target_level:
-
-	new_spte = iter.old_spte;
-
-	new_spte = new_spte & (~PT_WRITABLE_MASK);
-
-	ret = kvm_tdp_mmu_set_spte_atomic(vcpu->kvm, &iter, new_spte);
-	kvm_flush_remote_tlbs_gfn(vcpu->kvm, iter.gfn, iter.level);
-
-	pr_info("\e[42m TDP PTE found, level=%d gfn=%016llx old_spte=%016llx new_spte=%016llx ret=%d\e[0m",
-			iter.level, iter.gfn, iter.old_spte, new_spte, ret);
-out:	
+out:
 	rcu_read_unlock();
+
+	xa_unlock(xa_pgte);
 
 	return ret;
 }
 
-static int update_pgtable_entry(struct kvm_vcpu *vcpu, gpa_t gpte)
+
+bool kvm_is_protected_pgtable_entry(struct kvm_vcpu *vcpu, gpa_t gpa)
+{
+	bool ret;
+
+	struct xarray *xa_pgte = &vcpu->kvm->arch.guest_pgtable_protection.pages;
+	gfn_t gfn = gpa_to_gfn(gpa);
+
+	xa_lock(xa_pgte);
+	ret = xa_load(xa_pgte, gfn) != NULL;
+	xa_unlock(xa_pgte);
+
+	return ret;
+}
+
+static int update_pgtable_entry(struct kvm_vcpu *vcpu, gpa_t pte_gpa)
 {
 	int res;
 
 	struct xarray *xa_pgte = &vcpu->kvm->arch.guest_pgtable_protection.pages;
+	gfn_t pte_gfn = gpa_to_gfn(pte_gpa);
 
 	xa_lock(xa_pgte);
-	res = xa_insert(xa_pgte, gpte, (void *)gpte, GFP_KERNEL);
+	res = xa_insert(xa_pgte, pte_gfn, (void *)FROZEN_SPTE, GFP_KERNEL);
+	vcpu->kvm->arch.guest_pgtable_protection.dirty = true;
 	xa_unlock(xa_pgte);
-
 	
 	if (res == -ENOMEM)
 		return res;
 
 	if (res == 0) {
-		pr_info("\e[42m New PGTE GPA=%016llx, protecting... \e[0m", gpte);
-
-		res = protect_guest_pagetable_entry(vcpu, gpte);
-		if (res != 0) {
-			pr_err("\e[41m Protecting failed, error = %d \e[0m", res);
-		}
+		pr_info("\e[42m New PGTE GPA=%016llx \e[0m", pte_gpa);
 	}
 
 	return res;
@@ -237,3 +253,98 @@ int kvm_update_guest_pgtable_protection(struct kvm_vcpu *vcpu, unsigned long cr3
 	return res;
 }
 
+/* ********************************************************************************************* */
+/*                                DUMP 4-LEVEL PAGETABLE STARING WITH CR3                        */
+/* ********************************************************************************************* */
+
+static int dumped = 3;
+
+void vamp_dump_cr3(unsigned long cr3)
+{
+       if (dumped == 0)
+               return;
+       dumped--;
+
+       pr_info("\e[41m = PAGE DUMP BEGIN = \e[0m");
+
+       unsigned long pml4 = cr3 & 0x0ffffffffffff000;
+
+       pr_info("CR3  = %016lx", cr3);
+       pr_info("PML4\t%016lx\t%016lx", pml4, (unsigned long)__va(pml4));
+
+       pr_info("\n\n=========================== PD ====================================\n");
+       unsigned long *pml4p = (unsigned long *)__va(pml4);
+       for (int i4 = 0; i4 < 512; i4++, pml4p++)
+       {
+               unsigned long pml4e = *pml4p;
+               if ((pml4e & 1) == 0)
+                       continue;
+
+               unsigned long pml4e_addr = pml4e & 0x000ffffffffff000;
+               bool is_pdpt = !(pml4e & (1 << 7));
+               if (!is_pdpt)
+                       continue;
+               bool is_page = pml4e & (1 << 7);
+
+               pr_info("PML4E\t#%3d\t%016lx\t%016lx\tVA=%016lx\tPA=%016lx\t%s",
+                               i4,
+                               (unsigned long)pml4e,
+                               pml4e_addr,
+                               (unsigned long)__va(pml4e_addr),
+                               (unsigned long)__pa(__va(pml4e_addr)),
+                               is_page ? "Page" : "Page-Directory-Pointer Table");
+
+               unsigned long *pdptp = __va(pml4e_addr);
+               for (int i3 = 0; i3 < 512; i3++, pdptp++)
+               {
+                       unsigned long pdpte = *pdptp;
+                       if ((pdpte & 1) == 0)
+                               continue;
+
+                       unsigned long pdpte_addr = pdpte & 0x000ffffffffff000;
+                       bool is_page = pdpte & (1 << 7);
+
+                       pr_info("PDPTE\t#%03d\t%016lx\t%016lx\tVA=%016lx\tPA=%016lx\t%s",
+                                       i3,
+                                       (unsigned long)pdptp,
+                                       pdpte,
+                                       (unsigned long)__va(pdpte_addr),
+                                       (unsigned long)__pa(__va(pdpte_addr)),
+                                       is_page ? "Page" : "Page Directory");
+
+                       if (is_page)
+                               continue;
+
+                       unsigned long *pdp = __va(pdpte_addr);
+                       for (int i2 = 0; i2 < 512; i2++, pdp++)
+                       {
+                               unsigned long pde = *pdp;
+                               if ((pde & 1) == 0)
+                                       continue;
+
+                               unsigned long pde_addr = pde & 0x000ffffffffff000;
+                               bool is_page = pde & (1 << 7);
+
+                               if (is_page)
+                                       continue;
+
+                               pr_info("PDE\t#%03d\t%016lx\t%016lx\tVA=%016lx\tPA=%016lx\t%s",
+                                               i2,
+                                               (unsigned long)pdp,
+                                               pde,
+                                               (unsigned long)__va(pde_addr),
+                                               (unsigned long)__pa(__va(pde_addr)),
+                                               is_page ? "Page" : "Page Table");
+                       }
+
+
+               }
+       }
+
+
+
+
+       pr_info("\e[41m = PAGE DUMP END   = \e[0m");
+
+       // BUG();
+}

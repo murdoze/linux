@@ -1373,6 +1373,7 @@ struct kvm_possible_nx_huge_pages {
 
 struct kvm_guest_pgtable_protection
 {
+	bool dirty;
 	struct xarray cr3_pfn;
 	struct xarray pages;
 };
