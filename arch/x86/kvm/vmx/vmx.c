@@ -5793,10 +5793,29 @@ static int handle_ept_violation(struct kvm_vcpu *vcpu)
 
 	int cpl = vmx_get_cpl(vcpu);
 	if (kvm_is_protected_pgtable_entry(vcpu, gpa)) {
-		if (cpl == 3) {
-			unsigned long ept_write_mask = (1 << 1) | (1 << 8);
+		if (cpl == 3 || cpl == 0 ) {
+			unsigned long ept_write_mask = EPT_VIOLATION_ACC_WRITE | EPT_VIOLATION_GVA_TRANSLATED;
 			if ((exit_qualification & ept_write_mask) == ept_write_mask) {
-				pr_info("\e[41m EPT VIOLATION FOR A PROTECTED GPA=%016llx CPL=%d exit_qualification=%016lx  \e[0m", gpa, cpl, exit_qualification);
+
+				if (cpl == 3) {
+					pr_info("\e[41m EPT VIOLATION FOR A PROTECTED GPA=%016llx CPL=%d exit_qualification=%016lx  \e[0m", gpa, cpl, exit_qualification);
+
+					kvm_queue_exception_e(vcpu, GP_VECTOR, 0);
+
+					return 1;
+				}
+
+				unsigned long new_reprotect_pte_gfn = gpa_to_gfn(gpa);
+				vcpu->kvm->arch.guest_pgtable_protection.pgtable_write = true;
+
+				if (new_reprotect_pte_gfn != vcpu->kvm->arch.guest_pgtable_protection.reprotect_pte_gfn) {
+					vcpu->kvm->arch.guest_pgtable_protection.new_reprotect_pte_gfn = new_reprotect_pte_gfn;
+					u32 exec_control;
+					exec_control = vmcs_read32(CPU_BASED_VM_EXEC_CONTROL);
+					exec_control |= CPU_BASED_MONITOR_TRAP_FLAG;
+					vmcs_write32(CPU_BASED_VM_EXEC_CONTROL, exec_control);
+				}
+
 			}
 		}
 	} else {
@@ -5961,6 +5980,17 @@ static int handle_pause(struct kvm_vcpu *vcpu)
 
 static int handle_monitor_trap(struct kvm_vcpu *vcpu)
 {
+	//if (vmx_get_cpl(vcpu) == 3) 
+//		pr_info("\e[45m HANDLE MONITOR CPL=%d\e[0m", vmx_get_cpl(vcpu));
+
+	u32 exec_control;
+	exec_control = vmcs_read32(CPU_BASED_VM_EXEC_CONTROL);
+	exec_control &= ~CPU_BASED_MONITOR_TRAP_FLAG;
+	vmcs_write32(CPU_BASED_VM_EXEC_CONTROL, exec_control);
+
+	kvm_protect_guest_pte(vcpu);
+	vcpu->kvm->arch.guest_pgtable_protection.reprotect_pte_gfn = vcpu->kvm->arch.guest_pgtable_protection.new_reprotect_pte_gfn;
+
 	return 1;
 }
 

@@ -1,20 +1,20 @@
-#include "linux/gfp_types.h"
-#include "linux/rcupdate.h"
-#include "linux/stddef.h"
-#include "mmu/spte.h"
-#include "vdso/page.h"
 #include <kvm/vamp.h>
 
 #include <linux/kvm_host.h>
 
 #include <linux/xarray.h>
 #include <linux/printk.h>
+#include <linux/gfp_types.h>
+#include <linux/rcupdate.h>
+#include <linux/stddef.h>
 
 #include <mmu/mmu_internal.h>
 #include <mmu/tdp_mmu.h>
 #include <mmu/tdp_iter.h>
+#include <mmu/spte.h>
 
 #include "mmu.h"
+#include "vmx/vmx.h"
 
 #define PGT_ADDR_MASK 0x000ffffffffff000
 #define PGTE_PER_PAGE (PAGE_SIZE / sizeof(u64))
@@ -28,6 +28,50 @@ static inline gfn_t tdp_mmu_max_gfn_exclusive(void)
 	 * the slow emulation path every time.
 	 */
 	return kvm_mmu_max_gfn() + 1;
+}
+
+int kvm_protect_guest_pte(struct kvm_vcpu *vcpu)
+{
+	int ret = 0; 
+
+	gfn_t pte_gfn = vcpu->kvm->arch.guest_pgtable_protection.reprotect_pte_gfn;
+
+	u64 root_hpa = vcpu->arch.mmu->root.hpa;
+	struct kvm_mmu_page *root = root_to_sp(root_hpa);
+
+	struct tdp_iter iter;
+	u64 new_spte;
+
+	for_each_tdp_pte(iter, vcpu->kvm, root, pte_gfn, pte_gfn + 1) {
+		if (iter.level == PG_LEVEL_4K) {
+			if (iter.gfn != pte_gfn) {
+				pr_err("\e[41m Found wrong GFN, level=%d searched=%016llx found=%016llx \e[0m", iter.level, pte_gfn, iter.gfn);
+				goto out;
+			}
+			if ((iter.old_spte & PT_WRITABLE_MASK) == 0)
+				continue;
+
+			new_spte = iter.old_spte & ~(PT_WRITABLE_MASK);
+
+			ret = kvm_tdp_mmu_set_spte_atomic(vcpu->kvm, &iter, new_spte);
+
+			kvm_flush_remote_tlbs_gfn(vcpu->kvm, iter.gfn, iter.level);
+
+			if (vmx_get_cpl(vcpu) == 3)
+				pr_info("\e[42m Reprotecting  PTE found, root=%016llx level=%d gfn=%016llx old_spte=%016llx new_spte=%016llx ret=%d\e[0m",
+					root_hpa, iter.level, iter.gfn, iter.old_spte, new_spte, ret);
+
+			if (ret)
+				goto out;
+
+			//void *xa_ret = xa_store(xa_pgte, pte_gfn, (void *)new_spte, GFP_KERNEL);
+			//if (xa_ret != (void *)FROZEN_SPTE)
+			//	goto out;
+		}
+	}
+
+out:
+	return ret;
 }
 
 int kvm_protect_guest_pagetable(struct kvm_vcpu *vcpu, hpa_t root_hpa)

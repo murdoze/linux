@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
-#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+#include "kvm/vamp.h"
 
 #include "mmu.h"
 #include "mmu_internal.h"
@@ -1183,6 +1183,7 @@ static int tdp_mmu_map_handle_target_level(struct kvm_vcpu *vcpu,
 	u64 new_spte;
 	int ret = RET_PF_FIXED;
 	bool wrprot = false;
+	bool wrprotected = false;
 
 	if (WARN_ON_ONCE(sp->role.level != fault->goal_level))
 		return RET_PF_RETRY;
@@ -1196,10 +1197,17 @@ static int tdp_mmu_map_handle_target_level(struct kvm_vcpu *vcpu,
 
 	if (unlikely(!fault->slot))
 		new_spte = make_mmio_spte(vcpu, iter->gfn, ACC_ALL);
-	else
-		wrprot = make_spte(vcpu, sp, fault->slot, ACC_ALL, iter->gfn,
+	else {
+		unsigned int access = ACC_ALL;
+		if (kvm_is_protected_pgtable_entry(vcpu, fault->addr)) {
+			pr_info("\e[41m MAKE SPTE addr=%016llx pfn=%016llx fault->write=%d wprot=%d \e[0m", fault->addr, fault->pfn, fault->write, wrprot);
+			//access = access & (~ACC_WRITE_MASK);
+		}
+		wrprot = make_spte(vcpu, sp, fault->slot, access, iter->gfn,
 				   fault->pfn, iter->old_spte, fault->prefetch,
 				   false, fault->map_writable, &new_spte);
+
+	}
 
 	if (new_spte == iter->old_spte)
 		ret = RET_PF_SPURIOUS;
@@ -1215,7 +1223,7 @@ static int tdp_mmu_map_handle_target_level(struct kvm_vcpu *vcpu,
 	 * protected, emulation is needed. If the emulation was skipped,
 	 * the vCPU would have the same fault again.
 	 */
-	if (wrprot && fault->write)
+	if ((wrprot || wrprotected) && fault->write)
 		ret = RET_PF_WRITE_PROTECTED;
 
 	/* If a MMIO SPTE is installed, the MMIO will need to be emulated. */

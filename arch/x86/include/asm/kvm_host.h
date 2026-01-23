@@ -1374,6 +1374,9 @@ struct kvm_possible_nx_huge_pages {
 struct kvm_guest_pgtable_protection
 {
 	bool dirty;
+	bool pgtable_write;
+	gfn_t reprotect_pte_gfn;
+	gfn_t new_reprotect_pte_gfn;
 	struct xarray cr3_pfn;
 	struct xarray pages;
 };
