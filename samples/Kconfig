@@ -6,6 +6,8 @@ menuconfig SAMPLES
 
 if SAMPLES
 
+source "samples/jmp/Kconfig"
+
 config SAMPLE_AUXDISPLAY
 	bool "auxdisplay sample"
 	depends on CC_CAN_LINK

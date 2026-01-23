@@ -1,0 +1,3 @@
+
+config SAMPLE_JMP
+	bool "John's Module Playground Sample"
