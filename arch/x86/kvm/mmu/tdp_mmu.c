@@ -1200,7 +1200,7 @@ static int tdp_mmu_map_handle_target_level(struct kvm_vcpu *vcpu,
 	else {
 		unsigned int access = ACC_ALL;
 		if (kvm_is_protected_pgtable_entry(vcpu, fault->addr)) {
-			pr_info("\e[41m MAKE SPTE addr=%016llx pfn=%016llx fault->write=%d wprot=%d \e[0m", fault->addr, fault->pfn, fault->write, wrprot);
+			//pr_info("\e[41m MAKE SPTE addr=%016llx pfn=%016llx fault->write=%d wprot=%d \e[0m", fault->addr, fault->pfn, fault->write, wrprot);
 			//access = access & (~ACC_WRITE_MASK);
 		}
 		wrprot = make_spte(vcpu, sp, fault->slot, access, iter->gfn,

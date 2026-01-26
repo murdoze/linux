@@ -4,7 +4,7 @@
 #include <linux/kvm_host.h>
 
 #ifdef CONFIG_KVM_PROTECT_PGTABLE
-int kvm_update_guest_pgtable_protection(struct kvm_vcpu *vcpu, unsigned long cr3);
+int kvm_update_guest_pgtable_protection(struct kvm_vcpu *vcpu, unsigned long cr3, bool dump);
 int kvm_protect_guest_pte(struct kvm_vcpu *vcpu);
 int kvm_protect_guest_pagetable(struct kvm_vcpu *vcpu, hpa_t root_hpa);
 bool kvm_is_protected_pgtable_entry(struct kvm_vcpu *vcpu, gpa_t gpa);

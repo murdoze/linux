@@ -5440,7 +5440,7 @@ static int handle_set_cr3(struct kvm_vcpu *vcpu, unsigned long val)
 
 	unsigned long cr3 = val;
 
-	ret = kvm_update_guest_pgtable_protection(vcpu, cr3);
+	ret = kvm_update_guest_pgtable_protection(vcpu, cr3, false);
 	if (ret)
 		WARN_ON_ONCE(false);
 #else
@@ -5800,15 +5800,25 @@ static int handle_ept_violation(struct kvm_vcpu *vcpu)
 				if (cpl == 3) {
 					pr_info("\e[41m EPT VIOLATION FOR A PROTECTED GPA=%016llx CPL=%d exit_qualification=%016lx  \e[0m", gpa, cpl, exit_qualification);
 
+					unsigned long cr3 = kvm_read_cr3(vcpu);
+					kvm_update_guest_pgtable_protection(vcpu, cr3, true); // TODO: handle errors
+											//
 					kvm_queue_exception_e(vcpu, GP_VECTOR, 0);
 
 					return 1;
 				}
 
+				unsigned long cr3 = kvm_read_cr3(vcpu);
+				kvm_update_guest_pgtable_protection(vcpu, cr3, false); // TODO: handle errors
+				hpa_t root_hpa = vcpu->arch.mmu->root.hpa;	
+				kvm_protect_guest_pagetable(vcpu, root_hpa);
+
+				//pr_info("\e[45m EPT VIOLATION, UPDATING CR3=%016lx FOR A PROTECTED GPA=%016llx CPL=%d exit_qualification=%016lx  \e[0m", cr3, gpa, cpl, exit_qualification);
+				
 				unsigned long new_reprotect_pte_gfn = gpa_to_gfn(gpa);
 				vcpu->kvm->arch.guest_pgtable_protection.pgtable_write = true;
 
-				if (new_reprotect_pte_gfn != vcpu->kvm->arch.guest_pgtable_protection.reprotect_pte_gfn) {
+				if (true || new_reprotect_pte_gfn != vcpu->kvm->arch.guest_pgtable_protection.reprotect_pte_gfn) {
 					vcpu->kvm->arch.guest_pgtable_protection.new_reprotect_pte_gfn = new_reprotect_pte_gfn;
 					u32 exec_control;
 					exec_control = vmcs_read32(CPU_BASED_VM_EXEC_CONTROL);
@@ -5981,7 +5991,7 @@ static int handle_pause(struct kvm_vcpu *vcpu)
 static int handle_monitor_trap(struct kvm_vcpu *vcpu)
 {
 	//if (vmx_get_cpl(vcpu) == 3) 
-//		pr_info("\e[45m HANDLE MONITOR CPL=%d\e[0m", vmx_get_cpl(vcpu));
+ //		pr_info("\e[45m HANDLE MONITOR CPL=%d\e[0m", vmx_get_cpl(vcpu));
 
 	u32 exec_control;
 	exec_control = vmcs_read32(CPU_BASED_VM_EXEC_CONTROL);

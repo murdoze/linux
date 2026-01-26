@@ -58,8 +58,8 @@ int kvm_protect_guest_pte(struct kvm_vcpu *vcpu)
 			kvm_flush_remote_tlbs_gfn(vcpu->kvm, iter.gfn, iter.level);
 
 			if (vmx_get_cpl(vcpu) == 3)
-				pr_info("\e[42m Reprotecting  PTE found, root=%016llx level=%d gfn=%016llx old_spte=%016llx new_spte=%016llx ret=%d\e[0m",
-					root_hpa, iter.level, iter.gfn, iter.old_spte, new_spte, ret);
+				//pr_info("\e[42m Reprotecting  PTE found, root=%016llx level=%d gfn=%016llx old_spte=%016llx new_spte=%016llx ret=%d\e[0m",
+				//	root_hpa, iter.level, iter.gfn, iter.old_spte, new_spte, ret);
 
 			if (ret)
 				goto out;
@@ -152,7 +152,7 @@ bool kvm_is_protected_pgtable_entry(struct kvm_vcpu *vcpu, gpa_t gpa)
 	return ret;
 }
 
-static int update_pgtable_entry(struct kvm_vcpu *vcpu, gpa_t pte_gpa)
+static int update_pgtable_entry(struct kvm_vcpu *vcpu, gpa_t pte_gpa, int level)
 {
 	int res;
 
@@ -168,8 +168,10 @@ static int update_pgtable_entry(struct kvm_vcpu *vcpu, gpa_t pte_gpa)
 		return res;
 
 	if (res == 0) {
-		pr_info("\e[42m New PGTE GPA=%016llx \e[0m", pte_gpa);
+		pr_info("\e[42m PGTE GPA=%016llx level=%d\e[0m", pte_gpa, level);
 	}
+	if (res == -EBUSY)
+		res = 0;
 
 	return res;
 }
@@ -195,13 +197,13 @@ static int kvm_update_guest_cr3(struct kvm_vcpu *vcpu, unsigned long cr3)
 		return res;
 
 	if (res == 0) {
-		pr_info("\e[45m New CR3, GFN=%016llx \e[0m", cr3_pfn);
+		//pr_info("\e[45m New CR3, GFN=%016llx \e[0m", cr3_pfn);
 	}
 
 	return 0;
 }
 
-static int kvm_update_guest_pgtes(struct kvm_vcpu *vcpu, unsigned long cr3)
+static int kvm_update_guest_pgtes(struct kvm_vcpu *vcpu, unsigned long cr3, bool dump)
 {
 	int res = 0;
 
@@ -215,6 +217,13 @@ static int kvm_update_guest_pgtes(struct kvm_vcpu *vcpu, unsigned long cr3)
 
 	u64 gpa_pml4 = cr3 & CR3_ADDR_MASK;
 
+       if (dump) pr_info("\e[45m = GUEST PAGE DUMP BEGIN = \e[0m");
+
+       unsigned long pml4 = cr3 & 0x0ffffffffffff000;
+
+       if (dump) pr_info("CR3  = %016lx", cr3);
+       if (dump) pr_info("PML4\t%016lx\t%016lx", pml4, (unsigned long)__va(pml4));
+
 	res = kvm_read_guest(vcpu->kvm, gpa_pml4, l4_pgte_page, PAGE_SIZE);
 	if (res)
 		goto out;
@@ -226,8 +235,14 @@ static int kvm_update_guest_pgtes(struct kvm_vcpu *vcpu, unsigned long cr3)
 			continue;
 
 		unsigned long gpa_pml4e = g_pml4e & PGT_ADDR_MASK;
+                if (dump) pr_info("PML4E\t#%3d\t%016lx\t%016lx\t\t%s",
+                               i4,
+                               (unsigned long)g_pml4e,
+                               gpa_pml4e,
+                               "Page-Directory-Pointer Table");
 
-		res = update_pgtable_entry(vcpu, gpa_pml4e);
+
+		res = update_pgtable_entry(vcpu, gpa_pml4e, 4);
 		if (res)
 			goto out;
 
@@ -243,12 +258,18 @@ static int kvm_update_guest_pgtes(struct kvm_vcpu *vcpu, unsigned long cr3)
 				continue;
 
 			bool is_page = g_pdpte & (1 << 7);
+			u64 gpa_pdpte = g_pdpte & PGT_ADDR_MASK;
+
+                        if (dump) pr_info("PDPTE\t#%03d\t%016lx\t%016llx\t\t%s",
+                                       i3,
+                                       (unsigned long)g_pdpte,
+                                       gpa_pdpte,
+                                       is_page ? "Page" : "Page Directory");
+
 			if (is_page)
 				continue;
 
-			u64 gpa_pdpte = g_pdpte & PGT_ADDR_MASK;
-
-			res = update_pgtable_entry(vcpu, gpa_pdpte);
+			res = update_pgtable_entry(vcpu, gpa_pdpte, 3);
 			if (res)
 				goto out;
 
@@ -268,8 +289,13 @@ static int kvm_update_guest_pgtes(struct kvm_vcpu *vcpu, unsigned long cr3)
 					continue;
 
 				u64 gpa_pde = g_pde & PGT_ADDR_MASK;
+                                if (dump) pr_info("PDE\t#%03d\t%016lx\t%016llx\t\t%s",
+                                               i2,
+                                               (unsigned long)g_pde,
+                                               gpa_pde,
+                                               is_page ? "Page" : "Page Table");
 
-				res = update_pgtable_entry(vcpu, gpa_pde);
+				res = update_pgtable_entry(vcpu, gpa_pde, 2);
 				if (res)
 					goto out;
 			}
@@ -279,10 +305,11 @@ static int kvm_update_guest_pgtes(struct kvm_vcpu *vcpu, unsigned long cr3)
 out:
 	free_pages(pages, 2);
 
+        if (dump) pr_info("\e[45m = GUEST PAGE DUMP END   = \e[0m"); 
 	return res;
 }
 
-int kvm_update_guest_pgtable_protection(struct kvm_vcpu *vcpu, unsigned long cr3)
+int kvm_update_guest_pgtable_protection(struct kvm_vcpu *vcpu, unsigned long cr3, bool dump)
 {
 	int res;
 
@@ -291,7 +318,7 @@ int kvm_update_guest_pgtable_protection(struct kvm_vcpu *vcpu, unsigned long cr3
 		return res;
 
 	if (res == 0) {
-		res = kvm_update_guest_pgtes(vcpu, cr3);
+		res = kvm_update_guest_pgtes(vcpu, cr3, dump);
 	}
 
 	return res;
@@ -330,7 +357,7 @@ void vamp_dump_cr3(unsigned long cr3)
                        continue;
                bool is_page = pml4e & (1 << 7);
 
-               pr_info("PML4E\t#%3d\t%016lx\t%016lx\tVA=%016lx\tPA=%016lx\t%s",
+               pr_info("PML4E\t#%3d\t%016lx\t%016lx\tVA= %016lx\tPA= %016lx\t%s",
                                i4,
                                (unsigned long)pml4e,
                                pml4e_addr,
@@ -348,7 +375,7 @@ void vamp_dump_cr3(unsigned long cr3)
                        unsigned long pdpte_addr = pdpte & 0x000ffffffffff000;
                        bool is_page = pdpte & (1 << 7);
 
-                       pr_info("PDPTE\t#%03d\t%016lx\t%016lx\tVA=%016lx\tPA=%016lx\t%s",
+                       pr_info("PDPTE\t#%03d\t%016lx\t%016lx\tVA= %016lx\tPA= %016lx\t%s",
                                        i3,
                                        (unsigned long)pdptp,
                                        pdpte,
@@ -372,7 +399,7 @@ void vamp_dump_cr3(unsigned long cr3)
                                if (is_page)
                                        continue;
 
-                               pr_info("PDE\t#%03d\t%016lx\t%016lx\tVA=%016lx\tPA=%016lx\t%s",
+                               pr_info("PDE\t#%03d\t%016lx\t%016lx\tVA= %016lx\tPA= %016lx\t%s",
                                                i2,
                                                (unsigned long)pdp,
                                                pde,
